@@ -192,8 +192,15 @@ def download_esios(
     for i, (cs, ce) in enumerate(chunks, 1):
         cs_str = cs.strftime("%Y-%m-%dT00:00:00")
         ce_str = ce.strftime("%Y-%m-%dT23:59:59")
-        print(f"  Chunk {i}/{len(chunks)}: {cs} → {ce}")
-        chunk_df = _fetch_esios_chunk(indicator_id, cs_str, ce_str, headers, timeout)
+        chunk_cache_key = f"{indicator_id}_{cs_str}_{ce_str}"
+        chunk_path = _cache_path("esios_chunk", chunk_cache_key, cache_dir)
+        chunk_df = _load_cache(chunk_path)
+        if chunk_df is not None:
+            print(f"  Chunk {i}/{len(chunks)}: {cs} → {ce} (cached)")
+        else:
+            print(f"  Chunk {i}/{len(chunks)}: {cs} → {ce}")
+            chunk_df = _fetch_esios_chunk(indicator_id, cs_str, ce_str, headers, timeout)
+            _save_cache(chunk_df, chunk_path)
         frames.append(chunk_df)
 
     df = pd.concat(frames, ignore_index=True)
