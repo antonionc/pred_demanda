@@ -117,7 +117,7 @@ def download_esios(
     api_key_file: str = "esios_api_key.txt",
     cache_dir: str = "cache",
     timeout: int = 300,
-    chunk_months: int = 12,
+    chunk_months: int = 1,
 ) -> pd.DataFrame:
     """
     Download an ESIOS indicator and return a UTC-indexed hourly DataFrame.
@@ -141,7 +141,9 @@ def download_esios(
     timeout : int
         HTTP request timeout in seconds per chunk.
     chunk_months : int
-        Number of months per download chunk (default 12 = one year).
+        Number of months per download chunk (default 1). ESIOS redirects
+        larger requests to a temporary S3 file that often returns 404;
+        monthly chunks keep responses small enough to be served directly.
 
     Returns
     -------
