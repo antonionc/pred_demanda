@@ -207,8 +207,9 @@ def download_esios(
     df = df.sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
 
     # Resample from 5-min to 1-hour averages
-    df = df.set_index("datetime").resample("1h").mean().reset_index()
+    df = df.set_index("datetime").resample("1h").mean()
     df["value"] = df["value"].interpolate(method="time")
+    df = df.reset_index()
 
     _save_cache(df, path)
     print(f"[ESIOS] Downloaded {len(df)} hourly rows → cached.")
