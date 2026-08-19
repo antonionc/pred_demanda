@@ -86,6 +86,30 @@ def _save_cache(data, path: str) -> None:
 # ESIOS download
 # ---------------------------------------------------------------------------
 
+def _fetch_esios_chunk(
+    indicator_id: int,
+    start_dt: str,
+    end_dt: str,
+    headers: dict,
+    timeout: int,
+) -> pd.DataFrame:
+    """Fetch a single date-range chunk from ESIOS and return raw 5-min rows."""
+    url = f"https://api.esios.ree.es/indicators/{indicator_id}"
+    resp = requests.get(
+        url,
+        headers=headers,
+        params={"start_date": start_dt, "end_date": end_dt},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    values = resp.json()["indicator"]["values"]
+    if not values:
+        return pd.DataFrame(columns=["datetime", "value"])
+    df = pd.DataFrame(values)
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+    return df[["datetime", "value"]]
+
+
 def download_esios(
     indicator_id: int,
     start_date: str,
@@ -93,24 +117,31 @@ def download_esios(
     api_key_file: str = "esios_api_key.txt",
     cache_dir: str = "cache",
     timeout: int = 300,
+    chunk_months: int = 12,
 ) -> pd.DataFrame:
     """
     Download an ESIOS indicator and return a UTC-indexed hourly DataFrame.
+
+    Large date ranges are split into chunks of `chunk_months` months to avoid
+    server-side 500 errors on multi-year requests. Each chunk is downloaded
+    separately and the results are concatenated before caching.
 
     Parameters
     ----------
     indicator_id : int
         ESIOS indicator (e.g. 1293 for real demand).
     start_date : str
-        ISO date/datetime, e.g. '2020-01-01' or '2020-01-01T00:00:00'.
+        ISO date, e.g. '2020-01-01'.
     end_date : str
-        ISO date/datetime, e.g. '2025-07-31' or '2025-07-31T23:59:59'.
+        ISO date, e.g. '2025-07-31'.
     api_key_file : str
         Path to the plain-text file that contains the ESIOS API key.
     cache_dir : str
         Directory for pickle cache files.
     timeout : int
-        HTTP request timeout in seconds.
+        HTTP request timeout in seconds per chunk.
+    chunk_months : int
+        Number of months per download chunk (default 12 = one year).
 
     Returns
     -------
@@ -125,33 +156,46 @@ def download_esios(
         print(f"[ESIOS] Loaded indicator {indicator_id} from cache.")
         return cached
 
-    print(f"[ESIOS] Downloading indicator {indicator_id} ({start_date} → {end_date})…")
-
-    # Normalise date strings to ESIOS format (YYYY-MM-DDTHH:MM:SS)
-    if "T" not in start_date:
-        start_date = start_date + "T00:00:00"
-    if "T" not in end_date:
-        end_date = end_date + "T23:59:59"
-
     api_key = read_api_key(api_key_file)
-    url = f"https://api.esios.ree.es/indicators/{indicator_id}"
     headers = {
         "Accept": "application/json; application/vnd.esios-api-v1+json",
         "Content-Type": "application/json",
         "x-api-key": api_key,
     }
-    resp = requests.get(
-        url,
-        headers=headers,
-        params={"start_date": start_date, "end_date": end_date},
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    data = resp.json()
 
-    df = pd.DataFrame(data["indicator"]["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
-    df = df[["datetime", "value"]].sort_values("datetime").reset_index(drop=True)
+    # Build list of (chunk_start, chunk_end) date pairs
+    start = datetime.date.fromisoformat(start_date.split("T")[0])
+    end   = datetime.date.fromisoformat(end_date.split("T")[0])
+
+    chunks = []
+    cursor = start
+    while cursor <= end:
+        # Advance by chunk_months
+        month = cursor.month - 1 + chunk_months
+        chunk_end = datetime.date(
+            cursor.year + month // 12,
+            month % 12 + 1,
+            1,
+        ) - datetime.timedelta(days=1)
+        chunk_end = min(chunk_end, end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + datetime.timedelta(days=1)
+
+    print(
+        f"[ESIOS] Downloading indicator {indicator_id} "
+        f"({start_date} → {end_date}) in {len(chunks)} chunk(s)…"
+    )
+
+    frames = []
+    for i, (cs, ce) in enumerate(chunks, 1):
+        cs_str = cs.strftime("%Y-%m-%dT00:00:00")
+        ce_str = ce.strftime("%Y-%m-%dT23:59:59")
+        print(f"  Chunk {i}/{len(chunks)}: {cs} → {ce}")
+        chunk_df = _fetch_esios_chunk(indicator_id, cs_str, ce_str, headers, timeout)
+        frames.append(chunk_df)
+
+    df = pd.concat(frames, ignore_index=True)
+    df = df.sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
 
     # Resample from 5-min to 1-hour averages
     df = df.set_index("datetime").resample("1h").mean().reset_index()
