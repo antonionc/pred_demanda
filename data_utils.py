@@ -45,6 +45,17 @@ ESIOS_REE_FORECAST  = 544    # Previsión de demanda de REE
 # ---------------------------------------------------------------------------
 
 def read_api_key(filepath: str = "esios_api_key.txt") -> str:
+    # 1. Google Colab secrets
+    try:
+        from google.colab import userdata
+        return userdata.get("ESIOS_API_KEY")
+    except Exception:
+        pass
+    # 2. Environment variable
+    key = os.environ.get("ESIOS_API_KEY")
+    if key:
+        return key
+    # 3. Local file
     with open(filepath, "r") as f:
         return f.read().strip()
 
