@@ -41,23 +41,129 @@ ESIOS_REAL_DEMAND   = 1293   # Demanda real del sistema eléctrico
 ESIOS_REE_FORECAST  = 544    # Previsión de demanda de REE
 
 # ---------------------------------------------------------------------------
+# Colab & Persistent Storage helpers
+# ---------------------------------------------------------------------------
+
+def is_colab() -> bool:
+    """Check if the current Python environment is running inside Google Colab."""
+    try:
+        import google.colab
+        return True
+    except ImportError:
+        return False
+
+
+def setup_colab_drive(
+    drive_folder: str = "pred_demanda",
+    mount_point: str = "/content/drive",
+    subdirs: Optional[List[str]] = None,
+) -> bool:
+    """
+    Mount Google Drive and create persistent symlinks for workspace directories.
+
+    In Google Colab, ephemeral disk storage is wiped when a runtime disconnects.
+    This function mounts Google Drive and symlinks local project directories
+    (default: 'data', 'cache', 'saved_models') to persistent storage inside
+    Google Drive (`MyDrive/<drive_folder>/`).
+
+    If running outside Colab, it simply ensures the local directories exist.
+
+    Parameters
+    ----------
+    drive_folder : str
+        Folder name under Google Drive's 'MyDrive/' for this project.
+    mount_point  : str
+        Mount point for Google Drive in Colab (default: '/content/drive').
+    subdirs      : list of str, optional
+        Subdirectories to persist. Defaults to ['data', 'cache', 'saved_models'].
+
+    Returns
+    -------
+    bool
+        True if running in Colab and Drive was mounted / linked, False otherwise.
+    """
+    if subdirs is None:
+        subdirs = ["data", "cache", "saved_models"]
+
+    if not is_colab():
+        for sdir in subdirs:
+            os.makedirs(sdir, exist_ok=True)
+        return False
+
+    import shutil
+    from google.colab import drive
+
+    if not os.path.exists(mount_point) or not os.path.ismount(mount_point):
+        print(f"[Colab] Mounting Google Drive at {mount_point}...")
+        drive.mount(mount_point)
+    else:
+        print(f"[Colab] Google Drive is already mounted at {mount_point}.")
+
+    drive_base = os.path.join(mount_point, "MyDrive", drive_folder)
+    os.makedirs(drive_base, exist_ok=True)
+
+    for sdir in subdirs:
+        drive_dir = os.path.join(drive_base, sdir)
+        os.makedirs(drive_dir, exist_ok=True)
+
+        local_dir = os.path.abspath(sdir)
+        if os.path.islink(local_dir):
+            if os.path.realpath(local_dir) == os.path.realpath(drive_dir):
+                continue
+            os.remove(local_dir)
+        elif os.path.isdir(local_dir):
+            shutil.rmtree(local_dir)
+        elif os.path.exists(local_dir):
+            os.remove(local_dir)
+
+        os.symlink(drive_dir, local_dir)
+        print(f"[Colab] Persistent link: ./{sdir} -> {drive_dir}")
+
+    # Also link esios_api_key.txt from Drive if available and not present locally
+    drive_key = os.path.join(drive_base, "esios_api_key.txt")
+    local_key = os.path.abspath("esios_api_key.txt")
+    if os.path.exists(drive_key) and not os.path.exists(local_key):
+        try:
+            os.symlink(drive_key, local_key)
+            print(f"[Colab] Linked 'esios_api_key.txt' from Google Drive.")
+        except Exception:
+            pass
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # API key & cache helpers
 # ---------------------------------------------------------------------------
 
-def read_api_key(filepath: str = "esios_api_key.txt") -> str:
+def read_api_key(filepath: str = "esios_api_key.txt", drive_folder: str = "pred_demanda") -> str:
     # 1. Google Colab secrets
     try:
         from google.colab import userdata
-        return userdata.get("ESIOS_API_KEY")
+        key = userdata.get("ESIOS_API_KEY")
+        if key:
+            return key.strip()
     except Exception:
         pass
     # 2. Environment variable
     key = os.environ.get("ESIOS_API_KEY")
     if key:
-        return key
+        return key.strip()
     # 3. Local file
-    with open(filepath, "r") as f:
-        return f.read().strip()
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
+            return f.read().strip()
+    # 4. Google Drive persistent folder
+    drive_path = f"/content/drive/MyDrive/{drive_folder}/esios_api_key.txt"
+    if os.path.exists(drive_path):
+        with open(drive_path, "r") as f:
+            return f.read().strip()
+
+    raise FileNotFoundError(
+        f"ESIOS API key not found. Please provide '{filepath}', set the ESIOS_API_KEY "
+        f"environment variable, add ESIOS_API_KEY in Colab Secrets, or place 'esios_api_key.txt' "
+        f"in Google Drive at MyDrive/{drive_folder}/."
+    )
 
 
 def _cache_path(prefix: str, key: str, cache_dir: str = "cache") -> str:
