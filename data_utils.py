@@ -75,10 +75,14 @@ def get_drive_service(scopes: Optional[List[str]] = None):
 
     from google.colab import auth
     from googleapiclient.discovery import build
+    import google.auth
 
     print("[Colab] Requesting scoped access to Google Drive ('drive.file')...")
-    auth.authenticate_user(scopes=scopes)
-    _DRIVE_SERVICE = build("drive", "v3")
+    # authenticate_user() handles the Colab OAuth popup; google.auth.default()
+    # then returns credentials narrowed to the requested scope.
+    auth.authenticate_user()
+    creds, _ = google.auth.default(scopes=scopes)
+    _DRIVE_SERVICE = build("drive", "v3", credentials=creds)
     return _DRIVE_SERVICE
 
 
