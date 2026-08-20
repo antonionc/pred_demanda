@@ -41,8 +41,11 @@ ESIOS_REAL_DEMAND   = 1293   # Demanda real del sistema eléctrico
 ESIOS_REE_FORECAST  = 544    # Previsión de demanda de REE
 
 # ---------------------------------------------------------------------------
-# Colab & Persistent Storage helpers
+# Scoped Google Drive API Helpers (OAuth scope: drive.file)
 # ---------------------------------------------------------------------------
+
+SCOPES_DRIVE_FILE = ["https://www.googleapis.com/auth/drive.file"]
+_DRIVE_SERVICE = None
 
 def is_colab() -> bool:
     """Check if the current Python environment is running inside Google Colab."""
@@ -53,34 +56,103 @@ def is_colab() -> bool:
         return False
 
 
-def setup_colab_drive(
+def get_drive_service(scopes: Optional[List[str]] = None):
+    """
+    Authenticate with restricted OAuth scope ('drive.file') and return Drive v3 client.
+
+    The 'drive.file' scope grants access ONLY to files and folders created by this app/notebook,
+    preventing access to any of the user's other private files on Google Drive.
+    """
+    global _DRIVE_SERVICE
+    if _DRIVE_SERVICE is not None:
+        return _DRIVE_SERVICE
+
+    if not is_colab():
+        return None
+
+    if scopes is None:
+        scopes = SCOPES_DRIVE_FILE
+
+    from google.colab import auth
+    from googleapiclient.discovery import build
+
+    print("[Colab] Requesting scoped access to Google Drive ('drive.file')...")
+    auth.authenticate_user(scopes=scopes)
+    _DRIVE_SERVICE = build("drive", "v3")
+    return _DRIVE_SERVICE
+
+
+def _drive_find_or_create_folder(service, folder_name: str, parent_id: Optional[str] = None) -> str:
+    """Find or create a folder in Google Drive using Drive v3 API."""
+    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+
+    results = service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
+    files = results.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    body = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if parent_id:
+        body["parents"] = [parent_id]
+
+    folder = service.files().create(body=body, fields="id").execute()
+    return folder["id"]
+
+
+def _drive_upload_file(service, local_path: str, parent_id: str) -> None:
+    """Upload or update a local file in a Google Drive folder."""
+    from googleapiclient.http import MediaFileUpload
+
+    filename = os.path.basename(local_path)
+    query = f"name = '{filename}' and '{parent_id}' in parents and trashed = false"
+    results = service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
+    existing = results.get("files", [])
+
+    media = MediaFileUpload(local_path, resumable=True)
+    if existing:
+        file_id = existing[0]["id"]
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        body = {"name": filename, "parents": [parent_id]}
+        service.files().create(body=body, media_body=media, fields="id").execute()
+
+
+def _drive_download_file(service, file_id: str, local_path: str) -> None:
+    """Download a file from Google Drive to local filesystem."""
+    from googleapiclient.http import MediaIoBaseDownload
+
+    os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+    request = service.files().get_media(fileId=file_id)
+    with open(local_path, "wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+
+def sync_from_drive(
     drive_folder: str = "pred_demanda",
-    mount_point: str = "/content/drive",
     subdirs: Optional[List[str]] = None,
 ) -> bool:
     """
-    Mount Google Drive and create persistent symlinks for workspace directories.
-
-    In Google Colab, ephemeral disk storage is wiped when a runtime disconnects.
-    This function mounts Google Drive and symlinks local project directories
-    (default: 'data', 'cache', 'saved_models') to persistent storage inside
-    Google Drive (`MyDrive/<drive_folder>/`).
-
-    If running outside Colab, it simply ensures the local directories exist.
+    Download cached files, datasets, and models from scoped Google Drive folder.
 
     Parameters
     ----------
     drive_folder : str
-        Folder name under Google Drive's 'MyDrive/' for this project.
-    mount_point  : str
-        Mount point for Google Drive in Colab (default: '/content/drive').
+        Folder name under Google Drive for this project.
     subdirs      : list of str, optional
-        Subdirectories to persist. Defaults to ['data', 'cache', 'saved_models'].
+        Subdirectories to sync (default: ['data', 'cache', 'saved_models']).
 
     Returns
     -------
     bool
-        True if running in Colab and Drive was mounted / linked, False otherwise.
+        True if sync succeeded, False otherwise.
     """
     if subdirs is None:
         subdirs = ["data", "cache", "saved_models"]
@@ -90,46 +162,102 @@ def setup_colab_drive(
             os.makedirs(sdir, exist_ok=True)
         return False
 
-    import shutil
-    from google.colab import drive
+    service = get_drive_service()
+    root_id = _drive_find_or_create_folder(service, drive_folder)
 
-    if not os.path.exists(mount_point) or not os.path.ismount(mount_point):
-        print(f"[Colab] Mounting Google Drive at {mount_point}...")
-        drive.mount(mount_point)
-    else:
-        print(f"[Colab] Google Drive is already mounted at {mount_point}.")
-
-    drive_base = os.path.join(mount_point, "MyDrive", drive_folder)
-    os.makedirs(drive_base, exist_ok=True)
+    # Check for esios_api_key.txt in root
+    key_query = f"name = 'esios_api_key.txt' and '{root_id}' in parents and trashed = false"
+    key_res = service.files().list(q=key_query, spaces="drive", fields="files(id, name)").execute()
+    if key_res.get("files") and not os.path.exists("esios_api_key.txt"):
+        _drive_download_file(service, key_res["files"][0]["id"], "esios_api_key.txt")
+        print("[DriveSync] Downloaded 'esios_api_key.txt' from Google Drive.")
 
     for sdir in subdirs:
-        drive_dir = os.path.join(drive_base, sdir)
-        os.makedirs(drive_dir, exist_ok=True)
+        os.makedirs(sdir, exist_ok=True)
+        folder_id = _drive_find_or_create_folder(service, sdir, parent_id=root_id)
+        file_query = f"'{folder_id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'"
+        results = service.files().list(q=file_query, spaces="drive", fields="files(id, name)").execute()
+        files = results.get("files", [])
+        for f in files:
+            local_target = os.path.join(sdir, f["name"])
+            if not os.path.exists(local_target):
+                print(f"  [DriveSync] Downloading {sdir}/{f['name']}...")
+                _drive_download_file(service, f["id"], local_target)
 
-        local_dir = os.path.abspath(sdir)
-        if os.path.islink(local_dir):
-            if os.path.realpath(local_dir) == os.path.realpath(drive_dir):
-                continue
-            os.remove(local_dir)
-        elif os.path.isdir(local_dir):
-            shutil.rmtree(local_dir)
-        elif os.path.exists(local_dir):
-            os.remove(local_dir)
-
-        os.symlink(drive_dir, local_dir)
-        print(f"[Colab] Persistent link: ./{sdir} -> {drive_dir}")
-
-    # Also link esios_api_key.txt from Drive if available and not present locally
-    drive_key = os.path.join(drive_base, "esios_api_key.txt")
-    local_key = os.path.abspath("esios_api_key.txt")
-    if os.path.exists(drive_key) and not os.path.exists(local_key):
-        try:
-            os.symlink(drive_key, local_key)
-            print(f"[Colab] Linked 'esios_api_key.txt' from Google Drive.")
-        except Exception:
-            pass
-
+    print("[DriveSync] Sync from Google Drive complete.")
     return True
+
+
+def sync_to_drive(
+    drive_folder: str = "pred_demanda",
+    subdirs: Optional[List[str]] = None,
+) -> bool:
+    """
+    Upload local datasets, cache files, and models to scoped Google Drive folder.
+
+    Parameters
+    ----------
+    drive_folder : str
+        Folder name under Google Drive for this project.
+    subdirs      : list of str, optional
+        Subdirectories to sync (default: ['data', 'cache', 'saved_models']).
+
+    Returns
+    -------
+    bool
+        True if upload succeeded, False otherwise.
+    """
+    if subdirs is None:
+        subdirs = ["data", "cache", "saved_models"]
+
+    if not is_colab():
+        return False
+
+    service = get_drive_service()
+    root_id = _drive_find_or_create_folder(service, drive_folder)
+
+    for sdir in subdirs:
+        if not os.path.exists(sdir):
+            continue
+        folder_id = _drive_find_or_create_folder(service, sdir, parent_id=root_id)
+        for fname in os.listdir(sdir):
+            local_file = os.path.join(sdir, fname)
+            if os.path.isfile(local_file):
+                print(f"  [DriveSync] Uploading {sdir}/{fname} to Drive...")
+                _drive_upload_file(service, local_file, folder_id)
+
+    print("[DriveSync] Upload to Google Drive complete.")
+    return True
+
+
+def setup_colab_drive(
+    drive_folder: str = "pred_demanda",
+    subdirs: Optional[List[str]] = None,
+) -> bool:
+    """
+    Initialize persistent storage in Colab using narrow 'drive.file' scope.
+
+    Parameters
+    ----------
+    drive_folder : str
+        Folder name under Google Drive for this project.
+    subdirs      : list of str, optional
+        Subdirectories to persist. Defaults to ['data', 'cache', 'saved_models'].
+
+    Returns
+    -------
+    bool
+        True if running in Colab and sync succeeded, False otherwise.
+    """
+    if subdirs is None:
+        subdirs = ["data", "cache", "saved_models"]
+
+    if not is_colab():
+        for sdir in subdirs:
+            os.makedirs(sdir, exist_ok=True)
+        return False
+
+    return sync_from_drive(drive_folder=drive_folder, subdirs=subdirs)
 
 
 # ---------------------------------------------------------------------------
