@@ -56,6 +56,64 @@ def is_colab() -> bool:
         return False
 
 
+def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optional[str]:
+    """
+    Configure HF_TOKEN in os.environ and authenticate huggingface_hub if available.
+
+    Resolution priority:
+    1. Explicit `token` parameter passed to the function.
+    2. Existing `os.environ["HF_TOKEN"]` (e.g. set via remote shell / VS Code).
+    3. `.env` file in the project root.
+    4. Google Colab Secret via `google.colab.userdata` (if running in Colab UI).
+
+    Returns:
+        The token string if found/configured, or None.
+    """
+    if token:
+        os.environ["HF_TOKEN"] = token.strip()
+
+    hf_token = os.environ.get("HF_TOKEN")
+
+    # Read from .env if not found or placeholder
+    if not hf_token or "PLACEHOLDER" in hf_token:
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("HF_TOKEN=") and not line.startswith("#"):
+                        val = line.split("=", 1)[1].strip().strip("\"'")
+                        if val and "PLACEHOLDER" not in val:
+                            os.environ["HF_TOKEN"] = val
+                            hf_token = val
+                            break
+
+    # Try Colab userdata secret if inside Colab
+    if (not hf_token or "PLACEHOLDER" in hf_token) and is_colab():
+        try:
+            from google.colab import userdata
+            val = userdata.get("HF_TOKEN")
+            if val:
+                os.environ["HF_TOKEN"] = val
+                hf_token = val
+        except Exception:
+            pass
+
+    # Authenticate huggingface_hub if installed
+    if hf_token and "PLACEHOLDER" not in hf_token:
+        try:
+            from huggingface_hub import login
+            login(token=hf_token, add_to_git_credential=False)
+            print("Login success")
+        except Exception as e:
+            print(f"Login failed: {e}")
+            pass
+    else:
+        #Cannot find a proper token
+        print("Warning: HF_TOKEN not found. Proceeding without authentication.")    
+
+    return hf_token
+
+
 def get_drive_service(scopes: Optional[List[str]] = None):
     """
     Authenticate with restricted OAuth scope ('drive.file') and return Drive v3 client.
