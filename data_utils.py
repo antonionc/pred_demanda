@@ -6,6 +6,7 @@ hourly feature engineering, chronological split, metrics, and plotting.
 """
 
 import os
+import getpass
 import pickle
 import hashlib
 import datetime
@@ -56,7 +57,11 @@ def is_colab() -> bool:
         return False
 
 
-def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optional[str]:
+def setup_hf_token(
+    token: Optional[str] = None,
+    env_path: str = ".env",
+    prompt_if_missing: bool = True,
+) -> Optional[str]:
     """
     Configure HF_TOKEN in os.environ and authenticate huggingface_hub if available.
 
@@ -65,6 +70,7 @@ def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optio
     2. Existing `os.environ["HF_TOKEN"]` (e.g. set via remote shell / VS Code).
     3. `.env` file in the project root.
     4. Google Colab Secret via `google.colab.userdata` (if running in Colab UI).
+    5. Interactive prompt (`getpass`) asking the user for the token.
 
     Returns:
         The token string if found/configured, or None.
@@ -74,7 +80,7 @@ def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optio
 
     hf_token = os.environ.get("HF_TOKEN")
 
-    # Read from .env if not found or placeholder
+    # 1. Read from .env if not found or placeholder
     if not hf_token or "PLACEHOLDER" in hf_token:
         if os.path.exists(env_path):
             with open(env_path, "r", encoding="utf-8") as f:
@@ -87,7 +93,7 @@ def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optio
                             hf_token = val
                             break
 
-    # Try Colab userdata secret if inside Colab
+    # 2. Try Colab userdata secret if inside Colab
     if (not hf_token or "PLACEHOLDER" in hf_token) and is_colab():
         try:
             from google.colab import userdata
@@ -98,20 +104,28 @@ def setup_hf_token(token: Optional[str] = None, env_path: str = ".env") -> Optio
         except Exception:
             pass
 
-    # Authenticate huggingface_hub if installed
+    # 3. Prompt user interactively if still missing or placeholder
+    if (not hf_token or "PLACEHOLDER" in hf_token) and prompt_if_missing:
+        try:
+            user_input = getpass.getpass("Enter your Hugging Face Token (or press Enter to skip): ").strip()
+            if user_input:
+                os.environ["HF_TOKEN"] = user_input
+                hf_token = user_input
+        except Exception:
+            pass
+
+    # 4. Authenticate huggingface_hub if installed and token is valid
     if hf_token and "PLACEHOLDER" not in hf_token:
         try:
             from huggingface_hub import login
             login(token=hf_token, add_to_git_credential=False)
-            print("Login success")
+            print("[HuggingFace] Login successful.")
         except Exception as e:
-            print(f"Login failed: {e}")
-            pass
+            print(f"[HuggingFace] Login failed: {e}")
     else:
-        #Cannot find a proper token
-        print("Warning: HF_TOKEN not found. Proceeding without authentication.")    
+        print("[HuggingFace] Warning: No valid HF_TOKEN found. Proceeding without authentication.")
 
-    return hf_token
+    return hf_token if (hf_token and "PLACEHOLDER" not in hf_token) else None
 
 
 def get_drive_service(scopes: Optional[List[str]] = None):
