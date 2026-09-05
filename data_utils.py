@@ -926,7 +926,7 @@ def plot_training_history(
 
 def plot_comparison_table(
     results: Dict[str, Dict[str, float]],
-    figsize: Tuple[int, int] = (10, 3),
+    figsize: Tuple[int, int] = (12, 3),
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
@@ -934,16 +934,19 @@ def plot_comparison_table(
 
     Parameters
     ----------
-    results : {model_name → {'mape': …, 'rmse': …, 'mae': …, 'train_s': …}}
+    results : {model_name → {'mape': …, 'rmse': …, 'mae': …, 'train_s': …, 'inference_s': …}}
     """
     rows = []
     for model, m in results.items():
+        train_val = f"{m.get('train_s', 0):.1f}" if m.get("train_s") is not None else "—"
+        infer_val = f"{m.get('inference_s', 0):.3f}" if m.get("inference_s") is not None else "—"
         rows.append({
             "Model": model,
             "MAPE (%)": f"{m['mape']:.3f}",
             "RMSE (MW)": f"{m['rmse']:.1f}",
             "MAE (MW)":  f"{m['mae']:.1f}",
-            "Train time (s)": f"{m.get('train_s', 0):.1f}" if m.get("train_s") else "—",
+            "Train time (s)": train_val,
+            "Inference (s)": infer_val,
         })
     df = pd.DataFrame(rows).set_index("Model")
     print(df.to_string())
